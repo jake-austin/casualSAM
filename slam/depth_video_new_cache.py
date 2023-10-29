@@ -22,6 +22,7 @@ from slam import util_sintel_io
 from torch.nn.functional import interpolate
 from slam.models.uncertainty import HRNetUncertaintyModel, MidasUnceratintyModel
 from slam.models.cache import FeatListCache
+import torch.nn.functional as F
 
 
 def get_video_dataset(opt):
@@ -39,6 +40,40 @@ def get_video_dataset(opt):
         raise NotImplementedError(
             f'dataset name only support davis and sintel. Got {opt.dataset_name} instead')
 
+
+class ZoeDepth(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = torch.hub.load("isl-org/ZoeDepth", "ZoeD_NK", pretrained=True)
+    def forward(self, x):
+        return self.net.infer(x)
+
+
+
+class RawUncertaintyOpt(torch.nn.Module):
+    def __init__(self, number_of_frames, shape, output_channel=1, constant_uncertainty=False) -> None:
+        """
+        Saves a per-frame uncertainty map
+        """
+        super().__init__()
+        self.constant_uncertainty = constant_uncertainty
+        self.output_channel = output_channel
+        self.maps = torch.nn.Parameter(.5 * torch.ones(number_of_frames, output_channel, *shape))
+        self.elu = torch.nn.ELU(True)
+
+        if output_channel > 1:
+            self.scale = torch.nn.Parameter(torch.ones([1])*-2)
+    def forward(self, indices):
+        B, C, H, W = self.maps.shape
+        if self.constant_uncertainty:
+            return (torch.ones([B, self.output_channel, H, W]).to(indices.device)[indices])*0.5
+        else:
+            uncertainty = self.elu(self.maps[indices])+1
+            if self.output_channel > 1:
+                uncertainty_2 = uncertainty * \
+                    F.softplus(self.scale, beta=2)
+                uncertainty = torch.cat([uncertainty, uncertainty_2], dim=1)
+            return uncertainty
 
 class DepthVideoDataset(ABC):
     def __init__(self) -> None:
@@ -60,7 +95,7 @@ class DepthVideoDataset(ABC):
         self.init_cache()
         self.depth_based_warping = DepthBasedWarping()
 
-    def get_output_shape(self, multiple=64, max_width=None):
+    def get_output_shape(self, multiple=64, max_width=None):  # TODO: fix
         if max_width is None:
             W_max = self.opt.max_width  # use the read in width
         else:
@@ -135,14 +170,19 @@ class DepthVideoDataset(ABC):
             self.depth_net = MidasNet_featopt(path=midas_pretrain_path,
                                               normalize_input=True)
             self.depth_net.add_refine_branch()
+        elif self.opt.depth_net == 'zoedepth':
+            self.depth_net = ZoeDepth()
         else:
             raise NotImplementedError
         self.depth_net = self.depth_net.eval()
         if self.opt.use_uncertainty:
             # self.uncertainty_net = HRNetUncertaintyModel(
             #    output_shape=self.opt_shape)  # .eval()
-            self.uncertainty_net = MidasUnceratintyModel(
-                output_channel=self.opt.uncertainty_channels, constant_uncertainty=self.opt.use_constant_uncertainty)
+            if self.opt.depth_net != "zoedepth":
+                self.uncertainty_net = MidasUnceratintyModel(
+                    output_channel=self.opt.uncertainty_channels, constant_uncertainty=self.opt.use_constant_uncertainty)
+            else:
+                self.uncertainty_net = RawUncertaintyOpt(output_channel=self.opt.uncertainty_channels, constant_uncertainty=self.opt.use_constant_uncertainty, number_of_frames=self.number_of_frames, shape=self.opt_shape)
         self.flow_net = load_RAFT()
         self.flow_net = self.flow_net.eval()
         self.get_valid_flow_mask = OccMask(th=1.0)
@@ -175,8 +215,11 @@ class DepthVideoDataset(ABC):
             self.images_orig = self.images_orig.to(device)
 
     def reload_depth_net(self):
-        self.depth_net = MidasNet(path=midas_pretrain_path,
-                                  normalize_input=True)
+        if self.opt.depth_net != 'zoedepth':
+            self.depth_net = MidasNet(path=midas_pretrain_path,
+                                    normalize_input=True)
+        else:
+            self.depth_net = ZoeDepth()
         self.depth_net.to(self.device)
         self.depth_net = self.depth_net.eval()
         self.reset_optimizer()
@@ -203,6 +246,8 @@ class DepthVideoDataset(ABC):
             self.depth_optimizer = torch.optim.Adam(
                 self.depth_net.refine_branch.parameters(),
                 lr=self.opt.depth_lr)
+        elif self.opt.depth_net == 'zoedepth':
+            self.depth_optimizer = None
         else:
             raise NotImplementedError
 
@@ -221,10 +266,18 @@ class DepthVideoDataset(ABC):
         for p in self.uncertainty_net.parameters():
             p.requires_grad = False
         if self.opt.use_uncertainty:
-            for p in self.uncertainty_net.uncertainty_decoder.parameters():
-                p.requires_grad = True
-            self.uncertainty_optimizer = torch.optim.Adam(
-                self.uncertainty_net.uncertainty_decoder.parameters(), lr=self.opt.uncertainty_lr)
+            if self.opt.depth_net != 'zoedepth':
+                for p in self.uncertainty_net.uncertainty_decoder.parameters():
+                    p.requires_grad = True
+                self.uncertainty_optimizer = torch.optim.Adam(
+                    self.uncertainty_net.uncertainty_decoder.parameters(), lr=self.opt.uncertainty_lr)
+            elif self.opt.depth_net == 'zoedepth':
+                for p in self.uncertainty_net.parameters():
+                    p.requires_grad = True
+                self.uncertainty_optimizer = torch.optim.Adam(
+                    self.uncertainty_net.parameters(), lr=self.opt.uncertainty_lr)
+            else:
+                raise NotImplementedError
 
     def init_intrinsics_optimizer(self):
         self.intrinsics_optimizer = torch.optim.Adam(
@@ -266,23 +319,32 @@ class DepthVideoDataset(ABC):
                        for i in range(0, len(frame_range), batch_size)]
             for chunk in chuncks:
                 imgs = self.images[chunk, ...]
-                feats = self.depth_net.forward_backbone(imgs)
-                self.depthfeat_cache.add_feat(feats)
-                depths = self.depth_net.forward_refine(feats)
+                if self.opt.depth_net != 'zoedepth':
+                    feats = self.depth_net.forward_backbone(imgs)
+                    self.depthfeat_cache.add_feat(feats)
+                    depths = self.depth_net.forward_refine(feats)
+                elif self.opt.depth_net == 'zoedepth':
+                    depths = self.depth_net(imgs)
+                    #print(depths.shape, len(depths))
+                    #self.depthfeat_cache.add_feat(torch.empty(len(depths), device=depths.device))
+                else:
+                    raise NotImplementedError
                 self.initial_depth.append(depths)
             self.initial_depth = torch.cat(self.initial_depth, dim=0)
-            self.depthfeat_cache.convert_to_tensor()
+            if self.opt.depth_net != 'zoedepth':
+                self.depthfeat_cache.convert_to_tensor()
 
     def store_initial_uncertainty_feat(self, batch_size=10):
-        with torch.no_grad():
-            frame_range = list(range(self.number_of_frames))
-            chuncks = [frame_range[i:i+batch_size]
-                       for i in range(0, len(frame_range), batch_size)]
-            for chunk in chuncks:
-                imgs = self.images[chunk, ...]
-                feats = self.uncertainty_net.get_uncertainty_feat(imgs)
-                self.uncertainfeat_cache.add_feat(feats)
-            self.uncertainfeat_cache.convert_to_tensor()
+        if self.opt.depth_net != 'zoedepth':
+            with torch.no_grad():
+                frame_range = list(range(self.number_of_frames))
+                chuncks = [frame_range[i:i+batch_size]
+                        for i in range(0, len(frame_range), batch_size)]
+                for chunk in chuncks:
+                    imgs = self.images[chunk, ...]
+                    feats = self.uncertainty_net.get_uncertainty_feat(imgs)
+                    self.uncertainfeat_cache.add_feat(feats)
+                self.uncertainfeat_cache.convert_to_tensor()
 
     def store_relative_pose(self, frame_list=None):
         with torch.no_grad():
@@ -305,30 +367,50 @@ class DepthVideoDataset(ABC):
     def predict_depth(self, frame_index_list, no_grad=False):
         depths = []
         frame_list_cuda = torch.LongTensor(frame_index_list).to(self.device)
-        depth_feat = self.depthfeat_cache[frame_list_cuda]
-        depth_out = self.depth_net.forward_refine(depth_feat)
+        if self.opt.depth_net != 'zoedepth':
+            depth_feat = self.depthfeat_cache[frame_list_cuda]
+            depth_out = self.depth_net.forward_refine(depth_feat)
+        elif self.opt.depth_net == 'zoedepth':
+            depth_out = self.initial_depth[frame_list_cuda]
+        else:
+            raise NotImplementedError
         del frame_list_cuda
         return depth_out
 
     def predict_uncertainty(self, frame_index_list):
         img_index = torch.LongTensor(frame_index_list).to(device=self.device)
-        feat = self.uncertainfeat_cache[img_index]
-        return self.uncertainty_net(feat)
+        if self.opt.depth_net != 'zoedepth':
+            feat = self.uncertainfeat_cache[img_index]
+            return self.uncertainty_net(feat)
+        elif self.opt.depth_net == 'zoedepth':
+            return self.uncertainty_net(img_index)
+
 
     def predict_depth_with_uncertainty(self, frame_index_list, no_depth_grad=False):
-        if type(frame_index_list) is not torch.Tensor:
-            index_list_cuda = torch.LongTensor(
-                frame_index_list).to(self.device)
-            depth = self.depth_net.forward_refine(
-                self.depthfeat_cache[index_list_cuda])
-            uncetrainty = self.uncertainty_net(
-                self.uncertainfeat_cache[index_list_cuda])
-        else:
-            depth = self.depth_net.forward_refine(
-                self.depthfeat_cache[frame_index_list])
-            uncetrainty = self.uncertainty_net(
-                self.uncertainfeat_cache[frame_index_list])
-        return depth, uncetrainty
+        if self.opt.depth_net != 'zoedepth':
+            if type(frame_index_list) is not torch.Tensor:
+                index_list_cuda = torch.LongTensor(
+                    frame_index_list).to(self.device)
+                depth = self.depth_net.forward_refine(
+                    self.depthfeat_cache[index_list_cuda])
+                uncetrainty = self.uncertainty_net(
+                    self.uncertainfeat_cache[index_list_cuda])
+            else:
+                depth = self.depth_net.forward_refine(
+                    self.depthfeat_cache[frame_index_list])
+                uncetrainty = self.uncertainty_net(
+                    self.uncertainfeat_cache[frame_index_list])
+            return depth, uncetrainty
+        elif self.opt.depth_net == 'zoedepth':
+            if type(frame_index_list) is not torch.Tensor:
+                index_list_cuda = torch.LongTensor(
+                    frame_index_list).to(self.device)
+                depth = self.initial_depth[index_list_cuda]
+                uncetrainty = self.uncertainty_net(index_list_cuda)
+            else:
+                depth = self.initial_depth[frame_index_list]
+                uncetrainty = self.uncertainty_net(frame_index_list)
+            return depth, uncetrainty
 
     # def predict_depth_with_cache(self, frame_index_list):
     #     # this function does not pass gradients to depth prediction networks.

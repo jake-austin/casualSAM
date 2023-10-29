@@ -60,7 +60,9 @@ class DepthVideoOptimization():
 
     def set_all_optimizers(self):
         self.all_optimizers = [self.depth_video.rotation_optimizer, self.depth_video.translation_optimizer,
-                               self.depth_video.scale_and_shift_optimizer, self.depth_video.depth_optimizer]
+                               self.depth_video.scale_and_shift_optimizer]
+        if self.depth_video.depth_optimizer is not None:
+            self.all_optimizers.append(self.depth_video.depth_optimizer)
         if self.opt.use_uncertainty:
             self.all_optimizers.append(self.depth_video.uncertainty_optimizer)
         if self.opt.opt_intrinsics:
@@ -68,7 +70,7 @@ class DepthVideoOptimization():
 
     def set_active_optimizers(self, names):
         self.active_optimizers = []
-        if 'depth' in names:
+        if 'depth' in names and self.depth_video.depth_optimizer is not None:
             self.active_optimizers.append(self.depth_video.depth_optimizer)
         if 'pose' in names:
             self.active_optimizers.append(self.depth_video.rotation_optimizer)
@@ -85,8 +87,9 @@ class DepthVideoOptimization():
                 self.depth_video.uncertainty_optimizer)
 
     def init_pair(self, idx_1, idx_2):
-        self.all_optimizers = [self.depth_video.pose_optimizer,
-                               self.depth_video.depth_optimizer, self.depth_video.scale_and_shift_optimizer]
+        self.all_optimizers = [self.depth_video.pose_optimizer, self.depth_video.scale_and_shift_optimizer]
+        if self.depth_video.depth_optimizer is not None:
+            self.all_optimizers.append(self.depth_video.depth_optimizer)
 
         self.active_optimizers = [
             self.depth_video.pose_optimizer, self.depth_video.scale_and_shift_optimizer]
@@ -95,8 +98,9 @@ class DepthVideoOptimization():
         with Timer('scale init:'):
             self.optimize_over_keyframe_buffer(
                 no_depth_grad=True, iteration=601)
-        self.active_optimizers = [
-            self.depth_video.pose_optimizer, self.depth_video.depth_optimizer]
+        self.active_optimizers = [self.depth_video.pose_optimizer]
+        if self.depth_video.depth_optimizer is not None:
+            self.active_optimizers.append(self.depth_video.depth_optimizer)
         with Timer('full opt:'):
             self.optimize_over_keyframe_buffer(
                 no_depth_grad=False, iteration=1001)
@@ -109,8 +113,9 @@ class DepthVideoOptimization():
             self.depth_video.unfreeze_frame(f)
         self.depth_video.freeze_frame(frame_list[0], False)
         self.depth_video.freeze_frame(frame_list[1], False)
-        self.active_optimizers = [
-            self.depth_video.pose_optimizer, self.depth_video.depth_optimizer]
+        self.active_optimizers = [self.depth_video.pose_optimizer]
+        if self.depth_video.depth_optimizer is not None:
+            self.active_optimizers.append(self.depth_video.depth_optimizer)
         with Timer('full opt'):
             self.optimize_over_keyframe_buffer(
                 no_depth_grad=False, iteration=2001)
@@ -127,7 +132,9 @@ class DepthVideoOptimization():
                 'pose', 'scale', 'intrinsics', 'uncertainty']
         else:
             fix_scale_optimizers = [
-                'pose', 'depth', 'intrinsics', 'uncertainty']
+                'pose', 'intrinsics', 'uncertainty']
+            if self.depth_video.depth_optimizer is not None:
+                fix_scale_optimizers.append('depth')
 
         self.set_active_optimizers(scale_only_optimizers)
         # self.active_optimizers = [
@@ -201,7 +208,9 @@ class DepthVideoOptimization():
         # optimize first pair
         self.set_all_optimizers()
         scale_only_optimizers = ['pose', 'scale', 'intrinsics']
-        fix_scale_optimizers = ['pose', 'depth', 'intrinsics']
+        fix_scale_optimizers = ['pose', 'intrinsics']
+        if self.depth_video.depth_optimizer is not None:
+            fix_scale_optimizers.append('depth')
         # self.all_optimizers = [self.depth_video.pose_optimizer,
         #                       self.depth_video.scale_and_shift_optimizer, self.depth_video.depth_optimizer]
         # self.active_optimizers = [
@@ -355,7 +364,9 @@ class DepthVideoOptimization():
     def BA_over_all_frames_with_uncertainty(self, frame_list, iteration=500, max_range=None, batch_size=200):
         # here we get all pairs
         self.active_optimizers = [
-            self.depth_video.pose_optimizer, self.depth_video.depth_optimizer, self.depth_video.uncertainty_optimizer]
+            self.depth_video.pose_optimizer, self.depth_video.uncertainty_optimizer]
+        if self.depth_video.depth_optimizer is not None:
+            self.active_optimizers.append(self.depth_video.depth_optimizer)
         all_pairs_candidate = list(itertools.combinations(
             frame_list, 2))
         all_pairs = []
@@ -525,7 +536,9 @@ class DepthVideoOptimization():
     def BA_over_all_frames(self, frame_list, iteration=500, max_range=None, batch_size=200):
         # here we get all pairs
         self.active_optimizers = [
-            self.depth_video.pose_optimizer, self.depth_video.depth_optimizer]
+            self.depth_video.pose_optimizer]
+        if self.depth_video.depth_optimizer is not None:
+            self.active_optimizers.append(self.depth_video.depth_optimizer)
         all_pairs_candidate = list(itertools.combinations(
             frame_list, 2))
         all_pairs = []
