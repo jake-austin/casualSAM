@@ -9,7 +9,7 @@ sintel_seg_pattern = './moving_seg/{track_name}'
 sintel_data_root = ''
 midas_pretrain_path = join(project_path, 'pretrained_depth_ckpt/midas_cpkt.pt')
 # fill this line with your DAVIS path. Note that images should be under davis_path/JPEGImages/{track_name}/*.jpg
-davis_path = None
+davis_path = '/home/jake-austin/DAVIS'
 assert davis_path is not None
 
 

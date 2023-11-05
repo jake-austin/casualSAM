@@ -23,7 +23,8 @@ from torch.nn.functional import interpolate
 from slam.models.uncertainty import HRNetUncertaintyModel, MidasUnceratintyModel
 from slam.models.cache import FeatListCache
 import torch.nn.functional as F
-
+import torchvision
+import cv2
 
 def get_video_dataset(opt):
     if opt.dataset_name == 'davis':
@@ -36,18 +37,259 @@ def get_video_dataset(opt):
         return StaticTUMVideoDataset(opt)
     elif opt.dataset_name == 'davis_local':
         return DavisLocalVideoDataset(opt)
+    elif opt.dataset_name == 'local':
+        return LocalVideoDataset(opt)
     else:
         raise NotImplementedError(
             f'dataset name only support davis and sintel. Got {opt.dataset_name} instead')
 
 
+
+class Resize(object):
+    """Resize sample to given size (width, height).
+    """
+
+    def __init__(
+        self,
+        width,
+        height,
+        resize_target=True,
+        keep_aspect_ratio=False,
+        ensure_multiple_of=1,
+        resize_method="lower_bound",
+        image_interpolation_method=cv2.INTER_AREA,
+    ):
+        """Init.
+
+        Args:
+            width (int): desired output width
+            height (int): desired output height
+            resize_target (bool, optional):
+                True: Resize the full sample (image, mask, target).
+                False: Resize image only.
+                Defaults to True.
+            keep_aspect_ratio (bool, optional):
+                True: Keep the aspect ratio of the input sample.
+                Output sample might not have the given width and height, and
+                resize behaviour depends on the parameter 'resize_method'.
+                Defaults to False.
+            ensure_multiple_of (int, optional):
+                Output width and height is constrained to be multiple of this parameter.
+                Defaults to 1.
+            resize_method (str, optional):
+                "lower_bound": Output will be at least as large as the given size.
+                "upper_bound": Output will be at max as large as the given size. (Output size might be smaller than given size.)
+                "minimal": Scale as least as possible.  (Output size might be smaller than given size.)
+                Defaults to "lower_bound".
+        """
+        self.__width = width
+        self.__height = height
+
+        self.__resize_target = resize_target
+        self.__keep_aspect_ratio = keep_aspect_ratio
+        self.__multiple_of = ensure_multiple_of
+        self.__resize_method = resize_method
+        self.__image_interpolation_method = image_interpolation_method
+
+    def constrain_to_multiple_of(self, x, min_val=0, max_val=None):
+        y = (np.round(x / self.__multiple_of) * self.__multiple_of).astype(int)
+
+        if max_val is not None and y > max_val:
+            y = (np.floor(x / self.__multiple_of) * self.__multiple_of).astype(int)
+
+        if y < min_val:
+            y = (np.ceil(x / self.__multiple_of) * self.__multiple_of).astype(int)
+
+        return y
+
+    def get_size(self, width, height):
+        # determine new height and width
+        scale_height = self.__height / height
+        scale_width = self.__width / width
+
+        if self.__keep_aspect_ratio:
+            if self.__resize_method == "lower_bound":
+                # scale such that output size is lower bound
+                if scale_width > scale_height:
+                    # fit width
+                    scale_height = scale_width
+                else:
+                    # fit height
+                    scale_width = scale_height
+            elif self.__resize_method == "upper_bound":
+                # scale such that output size is upper bound
+                if scale_width < scale_height:
+                    # fit width
+                    scale_height = scale_width
+                else:
+                    # fit height
+                    scale_width = scale_height
+            elif self.__resize_method == "minimal":
+                # scale as least as possbile
+                if abs(1 - scale_width) < abs(1 - scale_height):
+                    # fit width
+                    scale_height = scale_width
+                else:
+                    # fit height
+                    scale_width = scale_height
+            else:
+                raise ValueError(
+                    f"resize_method {self.__resize_method} not implemented"
+                )
+
+        if self.__resize_method == "lower_bound":
+            new_height = self.constrain_to_multiple_of(
+                scale_height * height, min_val=self.__height
+            )
+            new_width = self.constrain_to_multiple_of(
+                scale_width * width, min_val=self.__width
+            )
+        elif self.__resize_method == "upper_bound":
+            new_height = self.constrain_to_multiple_of(
+                scale_height * height, max_val=self.__height
+            )
+            new_width = self.constrain_to_multiple_of(
+                scale_width * width, max_val=self.__width
+            )
+        elif self.__resize_method == "minimal":
+            new_height = self.constrain_to_multiple_of(scale_height * height)
+            new_width = self.constrain_to_multiple_of(scale_width * width)
+        else:
+            raise ValueError(f"resize_method {self.__resize_method} not implemented")
+
+        return (new_width, new_height)
+
+    def __call__(self, sample):
+        width, height = self.get_size(
+            sample["image"].shape[1], sample["image"].shape[0]
+        )
+
+        # resize sample
+        sample["image"] = cv2.resize(
+            sample["image"],
+            (width, height),
+            interpolation=self.__image_interpolation_method,
+        )
+
+        if self.__resize_target:
+            if "disparity" in sample:
+                sample["disparity"] = cv2.resize(
+                    sample["disparity"],
+                    (width, height),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+
+            if "depth" in sample:
+                sample["depth"] = cv2.resize(
+                    sample["depth"], (width, height), interpolation=cv2.INTER_NEAREST
+                )
+
+            sample["mask"] = cv2.resize(
+                sample["mask"].astype(np.float32),
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            sample["mask"] = sample["mask"].astype(bool)
+
+        return sample
+
+
+class NormalizeImage(object):
+    """Normlize image by given mean and std.
+    """
+
+    def __init__(self, mean, std):
+        self.__mean = mean
+        self.__std = std
+
+    def __call__(self, sample):
+        sample["image"] = (sample["image"] - self.__mean) / self.__std
+
+        return sample
+
+class PrepareForNet(object):
+    """Prepare sample for usage as network input.
+    """
+
+    def __init__(self):
+        pass
+
+    def __call__(self, sample):
+        image = np.transpose(sample["image"], (2, 0, 1))
+        sample["image"] = np.ascontiguousarray(image).astype(np.float32)
+
+        if "mask" in sample:
+            sample["mask"] = sample["mask"].astype(np.float32)
+            sample["mask"] = np.ascontiguousarray(sample["mask"])
+
+        if "disparity" in sample:
+            disparity = sample["disparity"].astype(np.float32)
+            sample["disparity"] = np.ascontiguousarray(disparity)
+
+        if "depth" in sample:
+            depth = sample["depth"].astype(np.float32)
+            sample["depth"] = np.ascontiguousarray(depth)
+
+        return sample
+
 class ZoeDepth(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.net = torch.hub.load("isl-org/ZoeDepth", "ZoeD_NK", pretrained=True)
+        self.dummy_param = torch.nn.Parameter(torch.zeros([1]))
     def forward(self, x):
-        return self.net.infer(x)
+        return (1/self.net.infer(x)) + torch.clip(self.dummy_param, 0, 1e-5)
+    def parameters(self):
+        return [self.dummy_param]
 
+
+class MidasV3(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = torch.hub.load("isl-org/MiDaS", "DPT_BEiT_L_512")
+        self.net.eval()
+        self.transforms = torchvision.transforms.Compose(
+            [
+                Resize(
+                    512,
+                    512,
+                    resize_target=None,
+                    keep_aspect_ratio=False,
+                    ensure_multiple_of=32,
+                    resize_method="minimal",
+                    image_interpolation_method=cv2.INTER_CUBIC,
+                ),
+                NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+                PrepareForNet(),
+            ]
+        )
+
+        self.dummy_param = torch.nn.Parameter(torch.zeros([1]))
+    def forward(self, x):
+        print(x.mean())
+        imgs = []
+        for i in range(len(x)):
+            img = self.transforms({"image": x[i].permute(1,2,0).cpu().numpy()})['image']
+            print(img.shape)
+            img = torch.from_numpy(img).unsqueeze(0)
+            imgs.append(img)
+
+        transformed = torch.concatenate(imgs, dim=0).to(x.device)
+        print(transformed.shape)
+        prediction = self.net(transformed).unsqueeze(1)
+        print(prediction.shape)
+        prediction = torch.nn.functional.interpolate(
+            prediction,
+            size=x.shape[2:],
+            mode="bicubic",
+            align_corners=False,
+        )
+        print(prediction.shape)
+        out = (prediction) + torch.clip(self.dummy_param, 0, 1e-5)
+        print(out.mean())
+        return out
+    def parameters(self):
+        return [self.dummy_param]
 
 
 class RawUncertaintyOpt(torch.nn.Module):
@@ -172,13 +414,15 @@ class DepthVideoDataset(ABC):
             self.depth_net.add_refine_branch()
         elif self.opt.depth_net == 'zoedepth':
             self.depth_net = ZoeDepth()
+        elif self.opt.depth_net == 'midasv3':
+            self.depth_net = MidasV3()
         else:
             raise NotImplementedError
         self.depth_net = self.depth_net.eval()
         if self.opt.use_uncertainty:
             # self.uncertainty_net = HRNetUncertaintyModel(
             #    output_shape=self.opt_shape)  # .eval()
-            if self.opt.depth_net != "zoedepth":
+            if self.opt.depth_net != "zoedepth" and self.opt.depth_net != "midasv3" and not self.opt.learn_raw_uncertainty:
                 self.uncertainty_net = MidasUnceratintyModel(
                     output_channel=self.opt.uncertainty_channels, constant_uncertainty=self.opt.use_constant_uncertainty)
             else:
@@ -215,9 +459,11 @@ class DepthVideoDataset(ABC):
             self.images_orig = self.images_orig.to(device)
 
     def reload_depth_net(self):
-        if self.opt.depth_net != 'zoedepth':
+        if self.opt.depth_net != 'zoedepth' and self.opt.depth_net != 'midasv3':
             self.depth_net = MidasNet(path=midas_pretrain_path,
                                     normalize_input=True)
+        elif self.opt.depth_net == 'midasv3':
+            self.depth_net = MidasV3()
         else:
             self.depth_net = ZoeDepth()
         self.depth_net.to(self.device)
@@ -246,8 +492,10 @@ class DepthVideoDataset(ABC):
             self.depth_optimizer = torch.optim.Adam(
                 self.depth_net.refine_branch.parameters(),
                 lr=self.opt.depth_lr)
-        elif self.opt.depth_net == 'zoedepth':
-            self.depth_optimizer = None
+        elif self.opt.depth_net == 'zoedepth' or self.opt.depth_net == 'midasv3':
+            self.depth_optimizer = torch.optim.Adam(
+                self.depth_net.parameters(),
+                lr=self.opt.depth_lr)
         else:
             raise NotImplementedError
 
@@ -266,12 +514,12 @@ class DepthVideoDataset(ABC):
         for p in self.uncertainty_net.parameters():
             p.requires_grad = False
         if self.opt.use_uncertainty:
-            if self.opt.depth_net != 'zoedepth':
+            if self.opt.depth_net != 'zoedepth' and self.opt.depth_net != 'midasv3' and not self.opt.learn_raw_uncertainty:
                 for p in self.uncertainty_net.uncertainty_decoder.parameters():
                     p.requires_grad = True
                 self.uncertainty_optimizer = torch.optim.Adam(
                     self.uncertainty_net.uncertainty_decoder.parameters(), lr=self.opt.uncertainty_lr)
-            elif self.opt.depth_net == 'zoedepth':
+            elif self.opt.depth_net == 'zoedepth' or self.opt.depth_net == 'midasv3' or self.opt.learn_raw_uncertainty:
                 for p in self.uncertainty_net.parameters():
                     p.requires_grad = True
                 self.uncertainty_optimizer = torch.optim.Adam(
@@ -319,11 +567,11 @@ class DepthVideoDataset(ABC):
                        for i in range(0, len(frame_range), batch_size)]
             for chunk in chuncks:
                 imgs = self.images[chunk, ...]
-                if self.opt.depth_net != 'zoedepth':
+                if self.opt.depth_net != 'zoedepth' and self.opt.depth_net != 'midasv3':
                     feats = self.depth_net.forward_backbone(imgs)
                     self.depthfeat_cache.add_feat(feats)
                     depths = self.depth_net.forward_refine(feats)
-                elif self.opt.depth_net == 'zoedepth':
+                elif self.opt.depth_net == 'zoedepth' or self.opt.depth_net == 'midasv3':
                     depths = self.depth_net(imgs)
                     #print(depths.shape, len(depths))
                     #self.depthfeat_cache.add_feat(torch.empty(len(depths), device=depths.device))
@@ -331,11 +579,11 @@ class DepthVideoDataset(ABC):
                     raise NotImplementedError
                 self.initial_depth.append(depths)
             self.initial_depth = torch.cat(self.initial_depth, dim=0)
-            if self.opt.depth_net != 'zoedepth':
+            if self.opt.depth_net != 'zoedepth' and self.opt.depth_net != 'midasv3':
                 self.depthfeat_cache.convert_to_tensor()
 
     def store_initial_uncertainty_feat(self, batch_size=10):
-        if self.opt.depth_net != 'zoedepth':
+        if self.opt.depth_net != 'zoedepth' and self.opt.depth_net != 'midasv3' and not self.opt.learn_raw_uncertainty:
             with torch.no_grad():
                 frame_range = list(range(self.number_of_frames))
                 chuncks = [frame_range[i:i+batch_size]
@@ -367,10 +615,10 @@ class DepthVideoDataset(ABC):
     def predict_depth(self, frame_index_list, no_grad=False):
         depths = []
         frame_list_cuda = torch.LongTensor(frame_index_list).to(self.device)
-        if self.opt.depth_net != 'zoedepth':
+        if self.opt.depth_net != 'zoedepth' and self.opt.depth_net != 'midasv3':
             depth_feat = self.depthfeat_cache[frame_list_cuda]
             depth_out = self.depth_net.forward_refine(depth_feat)
-        elif self.opt.depth_net == 'zoedepth':
+        elif self.opt.depth_net == 'zoedepth' or self.opt.depth_net == 'midasv3':
             depth_out = self.initial_depth[frame_list_cuda]
         else:
             raise NotImplementedError
@@ -379,29 +627,35 @@ class DepthVideoDataset(ABC):
 
     def predict_uncertainty(self, frame_index_list):
         img_index = torch.LongTensor(frame_index_list).to(device=self.device)
-        if self.opt.depth_net != 'zoedepth':
+        if self.opt.depth_net != 'zoedepth' and self.opt.depth_net != 'midasv3' and not self.opt.learn_raw_uncertainty:
             feat = self.uncertainfeat_cache[img_index]
             return self.uncertainty_net(feat)
-        elif self.opt.depth_net == 'zoedepth':
+        elif self.opt.depth_net == 'zoedepth' or self.opt.depth_net == 'midasv3' or self.opt.learn_raw_uncertainty:
             return self.uncertainty_net(img_index)
 
 
     def predict_depth_with_uncertainty(self, frame_index_list, no_depth_grad=False):
-        if self.opt.depth_net != 'zoedepth':
+        if self.opt.depth_net != 'zoedepth' and self.opt.depth_net != 'midasv3':
             if type(frame_index_list) is not torch.Tensor:
                 index_list_cuda = torch.LongTensor(
                     frame_index_list).to(self.device)
                 depth = self.depth_net.forward_refine(
                     self.depthfeat_cache[index_list_cuda])
-                uncetrainty = self.uncertainty_net(
-                    self.uncertainfeat_cache[index_list_cuda])
+                if not self.opt.learn_raw_uncertainty:
+                    uncetrainty = self.uncertainty_net(
+                        self.uncertainfeat_cache[index_list_cuda])
+                else:
+                    uncetrainty = self.uncertainty_net(index_list_cuda)
             else:
                 depth = self.depth_net.forward_refine(
                     self.depthfeat_cache[frame_index_list])
-                uncetrainty = self.uncertainty_net(
-                    self.uncertainfeat_cache[frame_index_list])
+                if not self.opt.learn_raw_uncertainty:
+                    uncetrainty = self.uncertainty_net(
+                        self.uncertainfeat_cache[frame_index_list])
+                else:
+                    uncetrainty = self.uncertainty_net(frame_index_list)
             return depth, uncetrainty
-        elif self.opt.depth_net == 'zoedepth':
+        elif self.opt.depth_net == 'zoedepth' or self.opt.depth_net == 'midasv3':
             if type(frame_index_list) is not torch.Tensor:
                 index_list_cuda = torch.LongTensor(
                     frame_index_list).to(self.device)
@@ -824,6 +1078,14 @@ class DavisVideoDataset(DepthVideoDataset):
         # self.depth_gt = torch.from_numpy(
         #     self.depth_gt[:, None, ...]).float().pin_memory()
         # print('done')
+
+
+class LocalVideoDataset(DavisVideoDataset):
+
+    def get_paths(self, opt):
+        assert opt.localdata_path is not None
+        self.paths = {'image_path': opt.localdata_path,
+                      'mask_path': None}
 
 
 class TUMVideoDataset(DepthVideoDataset):

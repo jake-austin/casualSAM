@@ -17,6 +17,8 @@ def parse_args(input_string=None):
     parser.add_argument('--gpu', type=str, default='1', help='gpu id')
     parser.add_argument('--track_name', type=str,
                         help='track name')
+    parser.add_argument('--localdata_path', type=str,
+                        help='path for non-davis local images', required=False, default=None)
     parser.add_argument('--dataset_name', type=str,
                         help='dataset name')
     parser.add_argument('--log_dir', type=str,
@@ -142,6 +144,8 @@ def parse_args(input_string=None):
                         default=None, help='checkpoint path')
     parser.add_argument('--uncertainty_only_iter', type=int,
                         default=101, help='iteration for uncertainty only BA')
+    parser.add_argument('--learn_raw_uncertainty',
+                        action='store_true', help='If enabled, learn raw uncertainty maps instead of adding a head on midas')
     if input_string is not None:
         opt = parser.parse_args(input_string)
     else:
@@ -203,6 +207,9 @@ def train_fn_from_opt(opt):
         frame_list = frame_list[:opt.frame_cap]
     frame_list = frame_list[::opt.frame_skip]
 
+    depth_opt.save_results(os.path.join(
+        opt.output_path, 'init'), frame_list=frame_list, with_uncertainty=True)
+
     if opt.depth_only_BA:
         K = dataset.camera_intrinsics.get_K_and_inv()[0].detach().cpu().numpy()
         logging.info('performing depth only BA')
@@ -228,7 +235,7 @@ def train_fn_from_opt(opt):
         logging.info(K)
         if opt.load_init:
             dataset.load_checkpoint(os.path.join(
-                opt.output_path, 'init_window_BA'))
+                opt.output_path, ' '))
             logging.info('loaded init')
         else:
             logging.info('running init')

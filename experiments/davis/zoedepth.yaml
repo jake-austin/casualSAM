@@ -12,7 +12,7 @@ uncertainty_lr: 1e-3
 rotation_lr: 1e-3
 translation_lr: 1e-4
 scale_lr : 1e-3
-depth_scale_init: 1e-3
+depth_scale_init: 1
 depth_lr: 0
 intrinsics_lr: 1e-5
 gpu : '0'
