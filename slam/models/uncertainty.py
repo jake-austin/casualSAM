@@ -3,11 +3,12 @@ from typing import List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from configs import midas_pretrain_path
+from configs import midas_pretrain_path, midas_pretrain_path_31
 from networks.midas_blocks import Interpolate
 from .uncertainty_helper import get_hrnet_segmentation_model
 from functools import partial
 from networks.MiDaS import MidasNet
+from networks.midas.dpt_depth import DPTDepthModel
 
 interpolate2D = partial(F.interpolate, mode='bilinear', align_corners=True)
 
@@ -49,9 +50,45 @@ class MidasUnceratintyModel(nn.Module):
             uncertainty = torch.cat([uncertainty, uncertainty_2], dim=1)
         return uncertainty
 
+class MidasUncertaintyModel_v31(nn.Module):
+    def __init__(self, output_shape=None, output_channel=1, constant_uncertainty=False) -> None:
+        super().__init__()
+        self.encoder_model = DPTDepthModel(path=midas_pretrain_path_31, non_negative=True).eval()
+        self.encoder_model.add_uncertainty_branch(
+            output_channel=1)
+        self.uncertainty_decoder = self.encoder_model.sigma_output
+        if output_channel > 1:
+            self.uncertainty_decoder.register_parameter(
+                'scale', nn.Parameter(torch.ones([1])*-2))
+        self.constant_uncertainty = constant_uncertainty
 
-class ResNetUncertaintyModel():
-    pass
+    def get_uncertainty_feat(self, imgs):
+        self.encoder_model.eval()
+        self.img_shape = imgs.shape[2:]
+        with torch.no_grad():
+            feats = self.encoder_model.forward_backbone(imgs)
+        return feats
+
+    def forward(self, feat):
+        f = feat[1]
+        B = f.shape[0]
+        if self.constant_uncertainty:
+            return torch.ones([B, 2, *self.img_shape]).to(f.device)*0.5
+        uncertainty = self.uncertainty_decoder(f)+1
+        if hasattr(self.uncertainty_decoder, 'scale'):
+            # / (self.uncertainty_decoder.scale+1e-6)
+            uncertainty_2 = uncertainty * \
+                F.softplus(self.uncertainty_decoder.scale, beta=2)
+            uncertainty = torch.cat([uncertainty, uncertainty_2], dim=1)
+        return uncertainty
+
+
+
+
+# class ResNetUncertaintyModel():
+#     pass
+
+
 
 
 class HRNetUncertaintyModel(nn.Module):

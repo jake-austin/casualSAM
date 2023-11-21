@@ -13,18 +13,20 @@ from util.util_colormap import heatmap_to_pseudo_color
 from third_party.raft import load_RAFT, get_input_padder
 from util.util_3dvideo import save_ply, depth_to_points_Rt, Video_3D_Webpage
 from networks.MiDaS import MidasNet, MidasNet_featopt
-from configs import midas_pretrain_path, davis_path
+from configs import midas_pretrain_path, davis_path, midas_pretrain_path_31
 from networks.goem_opt import _so3_exp_map, CameraPoseDeltaCollection, DepthScaleShiftCollection, DepthBasedWarping, CameraIntrinsics, get_relative_transform
 from skimage.transform import resize as imresize
 from tqdm import tqdm
 from slam.util_misc import Timer, ResultCache, KeyFrameBuffer
 from slam import util_sintel_io
 from torch.nn.functional import interpolate
-from slam.models.uncertainty import HRNetUncertaintyModel, MidasUnceratintyModel
+from slam.models.uncertainty import HRNetUncertaintyModel, MidasUnceratintyModel, MidasUncertaintyModel_v31
 from slam.models.cache import FeatListCache
 import torch.nn.functional as F
 import torchvision
 import cv2
+from networks.midas.dpt_depth import DPTDepthModel
+
 
 def get_video_dataset(opt):
     if opt.dataset_name == 'davis':
@@ -42,7 +44,6 @@ def get_video_dataset(opt):
     else:
         raise NotImplementedError(
             f'dataset name only support davis and sintel. Got {opt.dataset_name} instead')
-
 
 
 class Resize(object):
@@ -412,6 +413,9 @@ class DepthVideoDataset(ABC):
             self.depth_net = MidasNet_featopt(path=midas_pretrain_path,
                                               normalize_input=True)
             self.depth_net.add_refine_branch()
+        elif self.opt.depth_net == 'midasv3_finetune':
+            self.depth_net = DPTDepthModel(
+                path=midas_pretrain_path_31, non_negative=True)
         elif self.opt.depth_net == 'zoedepth':
             self.depth_net = ZoeDepth()
         elif self.opt.depth_net == 'midasv3':
@@ -423,8 +427,12 @@ class DepthVideoDataset(ABC):
             # self.uncertainty_net = HRNetUncertaintyModel(
             #    output_shape=self.opt_shape)  # .eval()
             if self.opt.depth_net != "zoedepth" and self.opt.depth_net != "midasv3" and not self.opt.learn_raw_uncertainty:
-                self.uncertainty_net = MidasUnceratintyModel(
-                    output_channel=self.opt.uncertainty_channels, constant_uncertainty=self.opt.use_constant_uncertainty)
+                if self.opt.depth_net == "midasv3_finetune":
+                    self.uncertainty_net = MidasUncertaintyModel_v31(
+                        output_channel=self.opt.uncertainty_channels, constant_uncertainty=self.opt.use_constant_uncertainty)
+                else:
+                    self.uncertainty_net = MidasUnceratintyModel(
+                        output_channel=self.opt.uncertainty_channels, constant_uncertainty=self.opt.use_constant_uncertainty)
             else:
                 self.uncertainty_net = RawUncertaintyOpt(output_channel=self.opt.uncertainty_channels, constant_uncertainty=self.opt.use_constant_uncertainty, number_of_frames=self.number_of_frames, shape=self.opt_shape)
         self.flow_net = load_RAFT()
@@ -459,11 +467,14 @@ class DepthVideoDataset(ABC):
             self.images_orig = self.images_orig.to(device)
 
     def reload_depth_net(self):
-        if self.opt.depth_net != 'zoedepth' and self.opt.depth_net != 'midasv3':
+        if self.opt.depth_net != 'zoedepth' and self.opt.depth_net != 'midasv3' and self.opt.depth_net != 'midasv3_finetune':
             self.depth_net = MidasNet(path=midas_pretrain_path,
                                     normalize_input=True)
         elif self.opt.depth_net == 'midasv3':
             self.depth_net = MidasV3()
+        elif self.opt.depth_net == 'midasv3_finetune':
+            self.depth_net = DPTDepthModel(
+                path=midas_pretrain_path_31, non_negative=True)
         else:
             self.depth_net = ZoeDepth()
         self.depth_net.to(self.device)
@@ -471,7 +482,7 @@ class DepthVideoDataset(ABC):
         self.reset_optimizer()
 
     def init_depth_optimizer(self):
-        if self.opt.depth_net == 'midas':
+        if self.opt.depth_net == 'midas' or self.opt.depth_net == 'midasv3_finetune':
             optimization_layers = self.opt.optimization_layers
             for p in self.depth_net.parameters():
                 p.requires_grad = False
