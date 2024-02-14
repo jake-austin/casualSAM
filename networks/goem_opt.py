@@ -364,6 +364,9 @@ class DepthScaleShiftCollection(torch.nn.Module):
         if self.grid_size != 1:
             scale = F.interpolate(scale, self.output_shape,
                                   mode='bilinear', align_corners=True)
+        # print(scale.shape, shift.shape)
+        shift = torch.broadcast_to(shift, scale.shape)
+        assert scale.shape == shift.shape
         return scale, shift
 
     def set_scale(self, index, scale):

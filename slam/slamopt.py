@@ -396,6 +396,7 @@ class DepthVideoOptimization():
         i_print = self.opt.i_print_full_BA
         with torch.no_grad():
             scale_tensor = self.get_scale_tensor(frame_list)
+            shift_tensor = self.get_shift_tensor(frame_list)
         init_depth_tensor = self.get_init_depth_tensor(frame_list)
         with Timer('full BA'):
             for iter in range(iteration):
@@ -405,6 +406,9 @@ class DepthVideoOptimization():
                 raw_depth_tensor, uncertainty = self.get_raw_depth_tensor_with_uncertainty(
                     frame_list)
                 depth_tensor = raw_depth_tensor*scale_tensor
+                if self.opt.use_shift:
+                    depth_tensor += shift_tensor
+                    depth_tensor = torch.clip(depth_tensor, min=0)
 
                 total_loss = 0
 
@@ -658,7 +662,11 @@ class DepthVideoOptimization():
             for o in self.all_optimizers:
                 o.zero_grad()
             scale_tensor = self.get_scale_tensor(frame_list)
+            shift_tensor = self.get_shift_tensor(frame_list)
             depth_tensor = raw_depth_tensor*scale_tensor
+            if self.opt.use_shift:
+                depth_tensor += shift_tensor
+                depth_tensor = torch.clip(depth_tensor, min=0)
             init_depth_tensor = init_raw_depth  # *scale_tensor.detach()
             pred = self.forwrard_prediction_by_pairs(
                 all_pairs, depth_tensor, frame_list, depth_tensor_init=init_depth_tensor)
@@ -681,11 +689,16 @@ class DepthVideoOptimization():
         i_print = self.opt.i_print_init_opt
         with torch.no_grad():
             scale_tensor = self.get_scale_tensor(frame_list)
+            shift_tensor = self.get_shift_tensor(frame_list)
             init_depth_tensor = self.get_init_depth_tensor(frame_list)
         for iter in range(iteration):
             raw_depth_tensor, uncertrainty_tensor = self.get_raw_depth_tensor_with_uncertainty(
                 frame_list)
             depth_tensor = raw_depth_tensor*scale_tensor
+            if self.opt.use_shift:
+                depth_tensor += shift_tensor
+                depth_tensor = torch.clip(depth_tensor, min=0)
+
             # loss = 0
             # self.depth_prediction_cache.empty_cache()
             for i, j in all_pairs:
@@ -726,10 +739,14 @@ class DepthVideoOptimization():
                 o.zero_grad()
 
             scale_tensor = self.get_scale_tensor(frame_list)
+            shift_tensor = self.get_shift_tensor(frame_list)
             uncertainty_tensor = self.depth_video.predict_uncertainty(
                 frame_list)
 
             depth_tensor = raw_depth_tensor*scale_tensor
+            if self.opt.use_shift:
+                depth_tensor = depth_tensor + shift_tensor
+                depth_tensor = torch.clip(depth_tensor, min=0)
             init_depth_tensor = raw_init_depth_tensor*scale_tensor.detach()
             pred = self.forwrard_prediction_by_pairs(
                 all_pairs, depth_tensor, frame_list, uncertainty_tensor=uncertainty_tensor, depth_tensor_init=init_depth_tensor)
@@ -744,7 +761,11 @@ class DepthVideoOptimization():
     def generate_depth_tensor(self, frame_list, no_depth_grad=False):
         raw_depth_tensor = self.get_raw_depth_tensor(frame_list)
         scale_tensor = self.get_scale_tensor(frame_list)
-        return raw_depth_tensor*scale_tensor
+        shift_tensor = self.get_shift_tensor(frame_list)
+        depth = raw_depth_tensor*scale_tensor
+        if opt.use_shift:
+            depth += shift_tensor
+        return depth
 
     def get_init_depth_tensor(self, frame_list):
         with torch.no_grad():
@@ -768,6 +789,14 @@ class DepthVideoOptimization():
             scale_tensor.append(scale)
         scale_tensor = torch.cat(scale_tensor, dim=0)
         return scale_tensor
+
+    def get_shift_tensor(self, frame_list):
+        shift_tensor = []
+        for i in frame_list:
+            _, shift = self.depth_video.scale_and_shift(i)
+            shift_tensor.append(shift)
+        shift_tensor = torch.cat(shift_tensor, dim=0)
+        return shift_tensor
 
     def get_flow_and_mask_from_list_of_pairs(self, list_of_pairs, cpu_cache=False):
         if cpu_cache is True:
@@ -803,12 +832,20 @@ class DepthVideoOptimization():
             depth_tensor, uncertainty_tensor = self.get_raw_depth_tensor_with_uncertainty(
                 unique_ids_cuda)
             scale = self.get_scale_tensor(unique_ids)
+            shift = self.get_shift_tensor(unique_ids)
             depth_tensor = depth_tensor*scale
+            if self.opt.use_shift:
+                depth_tensor += shift
+                depth_tensor = torch.clip(depth_tensor, min=0)
             uncertainty_tensor = uncertainty_tensor*scale_uncertainty
         else:
             depth_tensor = self.get_raw_depth_tensor(unique_ids)
             scale = self.get_scale_tensor(unique_ids)
+            shift = self.get_shift_tensor(unique_ids)
             depth_tensor = depth_tensor*scale
+            if self.opt.use_shift:
+                depth_tensor += shift
+                depth_tensor = torch.clip(depth_tensor, min=0)
             uncertainty_tensor = None
         init_depth_tensor = self.get_init_depth_tensor(unique_ids)
         # init_depth_tensor = init_depth_tensor*scale.detach()

@@ -146,6 +146,8 @@ def parse_args(input_string=None):
                         default=101, help='iteration for uncertainty only BA')
     parser.add_argument('--learn_raw_uncertainty',
                         action='store_true', help='If enabled, learn raw uncertainty maps instead of adding a head on midas')
+    parser.add_argument('--use_shift', action='store_true', help='use shift in depth net')
+
     if input_string is not None:
         opt = parser.parse_args(input_string)
     else:
