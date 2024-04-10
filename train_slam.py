@@ -17,6 +17,8 @@ def parse_args(input_string=None):
     parser.add_argument('--gpu', type=str, default='1', help='gpu id')
     parser.add_argument('--track_name', type=str,
                         help='track name')
+    parser.add_argument('--localdata_path', type=str,
+                        help='path for non-davis local images', required=False, default=None)
     parser.add_argument('--dataset_name', type=str,
                         help='dataset name')
     parser.add_argument('--log_dir', type=str,

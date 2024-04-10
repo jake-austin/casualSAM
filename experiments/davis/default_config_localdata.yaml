@@ -47,4 +47,4 @@ use_ego_flow_for_disp_consistency: False
 use_pose_init_reg: False
 depth_only_BA: False
 uncertainty_only_iter: 301
-prefix: '{date}/{dataset_name}_dev/{track_name}'
+prefix: ''

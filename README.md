@@ -6,6 +6,11 @@
 5. configargparse
 6. tqdm
 
+##Install:
+`conda create -n casualSAM -y python=3.8`
+`python -m pip install -r requirements.txt`
+
+
 ### download midas checkpoints:
 `bash download_depth_ckpt.sh`
 
