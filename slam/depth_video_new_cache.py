@@ -35,6 +35,8 @@ def get_video_dataset(opt):
         return StaticTUMVideoDataset(opt)
     elif opt.dataset_name == 'davis_local':
         return DavisLocalVideoDataset(opt)
+    elif opt.dataset_name == 'local':
+        return LocalVideoDataset(opt)
     else:
         raise NotImplementedError(
             f'dataset name only support davis and sintel. Got {opt.dataset_name} instead')
@@ -888,5 +890,15 @@ class StaticTUMVideoDataset(DepthVideoDataset):
 
     def read_gt_info(self):
         pass
+
+
+class LocalVideoDataset(DavisVideoDataset):
+
+    def get_paths(self, opt):
+        assert opt.localdata_path is not None
+        self.paths = {'image_path': opt.localdata_path,
+                      'mask_path': None}
+
+
 
 # %%
